@@ -220,9 +220,8 @@ def _normalize(name: str) -> str:
     return n
 
 
-def extract_characters(text: str, max_chars: int = 500_000) -> tuple[list[str], dict[str, set[str]]]:
-    """Returns (canonical_names, alias_map) where alias_map[canonical] = {all variants}."""
-    # Skip front/back matter (prefaces, endnotes) — analyze middle 85%
+def extract_characters(text: str, max_chars: int = 500_000) -> tuple[list[dict], dict[str, set[str]]]:
+    """Returns (character_dicts, alias_map) where each dict has {name, mentions}."""
     text = text[:max_chars]
     total_len = len(text)
     skip_front = total_len * 8 // 100
@@ -230,7 +229,6 @@ def extract_characters(text: str, max_chars: int = 500_000) -> tuple[list[str], 
     body = text[skip_front:total_len - skip_back] if total_len > 20000 else text
     doc = nlp(body)
 
-    # Count how often each name appears as PERSON vs non-PERSON entity
     person_counts: Counter = Counter()
     non_person_counts: Counter = Counter()
     for ent in doc.ents:
@@ -242,7 +240,6 @@ def extract_characters(text: str, max_chars: int = 500_000) -> tuple[list[str], 
         elif ent.label_ in ("GPE", "LOC", "ORG", "FAC", "EVENT", "WORK_OF_ART", "PRODUCT", "NORP"):
             non_person_counts[cleaned] += 1
 
-    # Exclude names that appear more as non-person than person
     raw_counts: Counter = Counter()
     for name, count in person_counts.items():
         if non_person_counts.get(name, 0) >= count:
@@ -252,22 +249,20 @@ def extract_characters(text: str, max_chars: int = 500_000) -> tuple[list[str], 
     if not raw_counts:
         return [], {}
 
-    # Merge: longest form preferred as canonical
     canonical_list, alias_map = _merge_all(raw_counts)
-
-    # Apply known nickname mappings
     canonical_list, alias_map = _apply_nicknames(canonical_list, alias_map)
 
-    # Filter by minimum frequency
     total_mentions = sum(raw_counts[a] for aliases in alias_map.values() for a in aliases)
     min_count = max(3, total_mentions // 200)
     filtered = []
     for name in canonical_list:
         mentions = sum(raw_counts.get(a, 0) for a in alias_map.get(name, {name}))
         if mentions >= min_count:
-            filtered.append(name)
+            filtered.append({"name": name, "mentions": mentions})
 
-    return filtered[:20], {k: v for k, v in alias_map.items() if k in filtered[:20]}
+    filtered = filtered[:20]
+    filtered_names = [c["name"] for c in filtered]
+    return filtered, {k: v for k, v in alias_map.items() if k in filtered_names}
 
 
 def _merge_all(counts: Counter) -> tuple[list[str], dict[str, set[str]]]:
@@ -404,14 +399,25 @@ def _apply_nicknames(canonical_list: list[str], alias_map: dict[str, set[str]]) 
     return result, alias_map
 
 
-def build_relationships(text: str, characters: list[str], alias_map: dict[str, set[str]], window: int = 3) -> list[dict]:
+def build_relationships(
+    text: str,
+    characters: list[dict],
+    alias_map: dict[str, set[str]],
+    window: int = 3,
+    use_model: bool = True,
+    progress_callback=None,
+) -> list[dict]:
+    from relation_extractor import get_extractor
+
+    char_names = [c["name"] for c in characters]
     paragraphs = [p.strip() for p in text.split("\n\n") if len(p.strip()) > 50]
     co_occur: Counter = Counter()
+    pair_passages: dict[tuple, list[str]] = {}
 
     for i in range(0, len(paragraphs), window):
         chunk = " ".join(paragraphs[i:i + window])
         present = []
-        for canon in characters:
+        for canon in char_names:
             aliases = alias_map.get(canon, {canon})
             if any(a in chunk for a in aliases):
                 present.append(canon)
@@ -420,17 +426,56 @@ def build_relationships(text: str, characters: list[str], alias_map: dict[str, s
             for b_idx in range(a_idx + 1, len(present)):
                 pair = tuple(sorted([present[a_idx], present[b_idx]]))
                 co_occur[pair] += 1
+                if pair not in pair_passages:
+                    pair_passages[pair] = []
+                if len(pair_passages[pair]) < 10:
+                    pair_passages[pair].append(chunk[:500])
 
+    top_pairs = co_occur.most_common(30)
     relationships = []
-    for (a, b), weight in co_occur.most_common(30):
-        relationships.append({"source": a, "target": b, "weight": weight})
+
+    if use_model:
+        extractor = get_extractor()
+        total = len(top_pairs)
+        for idx, ((a, b), weight) in enumerate(top_pairs):
+            passages = pair_passages.get((a, b), [])
+            if passages:
+                result = extractor.classify_passages(passages, a, b)
+            else:
+                result = {"type": "neutral", "confidence": 0.0, "direction": "bidirectional"}
+
+            sample_passages = passages[:3]
+            relationships.append({
+                "source": a,
+                "target": b,
+                "weight": weight,
+                "type": result["type"],
+                "confidence": result["confidence"],
+                "direction": result["direction"],
+                "passages": sample_passages,
+            })
+            if progress_callback:
+                progress_callback(60 + int(40 * (idx + 1) / total))
+    else:
+        for (a, b), weight in top_pairs:
+            relationships.append({
+                "source": a,
+                "target": b,
+                "weight": weight,
+                "type": "neutral",
+                "confidence": 0.0,
+                "direction": "bidirectional",
+                "passages": pair_passages.get((a, b), [])[:3],
+            })
+
     return relationships
 
 
-def generate_mermaid(characters: list[str], relationships: list[dict]) -> str:
+def generate_mermaid(characters: list[dict], relationships: list[dict]) -> str:
     lines = ["graph TD"]
     node_ids: dict[str, str] = {}
-    for i, name in enumerate(characters):
+    for i, char in enumerate(characters):
+        name = char["name"] if isinstance(char, dict) else char
         node_id = f"C{i}"
         node_ids[name] = node_id
         safe_name = name.replace('"', "'")
@@ -440,7 +485,12 @@ def generate_mermaid(characters: list[str], relationships: list[dict]) -> str:
         src = node_ids.get(rel["source"])
         tgt = node_ids.get(rel["target"])
         if src and tgt:
-            label = str(rel["weight"])
-            lines.append(f"    {src} -->|{label}| {tgt}")
+            rel_type = rel.get("type", "")
+            weight = rel.get("weight", "")
+            label = f"{rel_type}({weight})" if rel_type else str(weight)
+            if rel.get("direction", "bidirectional") == "bidirectional":
+                lines.append(f"    {src} ---|{label}| {tgt}")
+            else:
+                lines.append(f"    {src} -->|{label}| {tgt}")
 
     return "\n".join(lines)
