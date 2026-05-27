@@ -1,5 +1,5 @@
 import torch
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from transformers import pipeline
 
 RELATIONSHIP_TYPES = [
     "friend",
@@ -12,32 +12,35 @@ RELATIONSHIP_TYPES = [
     "neutral",
 ]
 
-HYPOTHESES = {
-    "friend": "{A} and {B} are friends or allies.",
-    "enemy": "{A} and {B} are enemies or rivals.",
-    "family": "{A} and {B} are family members or relatives.",
-    "romantic": "{A} and {B} are in a romantic relationship or are lovers.",
-    "mentor": "{A} is a mentor, teacher, or guide to {B}.",
-    "servant": "{A} is a servant, employee, or subordinate of {B}.",
-    "colleague": "{A} and {B} are colleagues or professional associates.",
-    "neutral": "{A} and {B} are acquaintances with no strong relationship.",
-}
+CANDIDATE_LABELS = [
+    "close friends and allies who support each other",
+    "enemies and rivals who hate each other",
+    "family relatives such as parent child sibling or spouse",
+    "romantic lovers in a love relationship",
+    "mentor and student or teacher and pupil",
+    "master and servant or employer and worker",
+    "professional colleagues who work together",
+    "distant acquaintances with no strong bond",
+]
+
+LABEL_TO_TYPE = dict(zip(CANDIDATE_LABELS, RELATIONSHIP_TYPES))
 
 DIRECTIONAL_TYPES = {"mentor", "servant"}
 
-MODEL_NAME = "cross-encoder/nli-deberta-v3-base"
+MODEL_NAME = "facebook/bart-large-mnli"
 
 
 class RelationExtractor:
     def __init__(self):
-        self.tokenizer = None
-        self.model = None
+        self._classifier = None
         self._loaded = False
 
     def load(self):
-        self.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        self.model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
-        self.model.eval()
+        self._classifier = pipeline(
+            "zero-shot-classification",
+            model=MODEL_NAME,
+            device=-1,  # CPU
+        )
         self._loaded = True
 
     @property
@@ -55,54 +58,48 @@ class RelationExtractor:
             self.load()
 
         sampled = passages[:max_passages]
-        premise = " ".join(sampled)[:2000]
+        premise = " ".join(sampled)[:1500]
 
-        scores = self._batch_score(premise, char_a, char_b)
+        sequence = f"The relationship between {char_a} and {char_b}: {premise}"
 
-        best_type = max(scores, key=scores.get)
-        confidence = scores[best_type]
+        result = self._classifier(
+            sequence,
+            candidate_labels=CANDIDATE_LABELS,
+            multi_label=False,
+        )
+
+        top_label = result["labels"][0]
+        top_score = result["scores"][0]
+        best_type = LABEL_TO_TYPE[top_label]
 
         if best_type in DIRECTIONAL_TYPES:
-            rev_scores = self._batch_score(premise, char_b, char_a)
-            rev_confidence = rev_scores[best_type]
-            if rev_confidence > confidence:
-                direction = f"{char_b} -> {char_a}"
-                confidence = rev_confidence
-            else:
-                direction = f"{char_a} -> {char_b}"
+            dir_result = self._classify_direction(premise, char_a, char_b, best_type)
+            direction = dir_result
         else:
             direction = "bidirectional"
 
         return {
             "type": best_type,
-            "confidence": round(confidence, 3),
+            "confidence": round(top_score, 3),
             "direction": direction,
         }
 
-    def _batch_score(self, premise: str, char_a: str, char_b: str) -> dict[str, float]:
-        hypotheses = []
-        type_order = []
-        for rel_type, template in HYPOTHESES.items():
-            hypotheses.append(template.format(A=char_a, B=char_b))
-            type_order.append(rel_type)
+    def _classify_direction(self, premise: str, char_a: str, char_b: str, rel_type: str) -> str:
+        if rel_type == "mentor":
+            labels = [
+                f"{char_a} is the mentor or teacher of {char_b}",
+                f"{char_b} is the mentor or teacher of {char_a}",
+            ]
+        else:
+            labels = [
+                f"{char_a} serves or works for {char_b}",
+                f"{char_b} serves or works for {char_a}",
+            ]
 
-        inputs = self.tokenizer(
-            [premise] * len(hypotheses),
-            hypotheses,
-            return_tensors="pt",
-            truncation=True,
-            max_length=512,
-            padding=True,
-        )
-
-        with torch.no_grad():
-            logits = self.model(**inputs).logits
-
-        # NLI labels: [contradiction, neutral, entailment]
-        probs = torch.softmax(logits, dim=1)
-        entailment_scores = probs[:, 2].tolist()
-
-        return dict(zip(type_order, entailment_scores))
+        result = self._classifier(premise, candidate_labels=labels, multi_label=False)
+        if result["labels"][0] == labels[0]:
+            return f"{char_a} -> {char_b}"
+        return f"{char_b} -> {char_a}"
 
 
 _extractor: RelationExtractor | None = None
