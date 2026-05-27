@@ -78,14 +78,15 @@ function App() {
                   <strong>{book.title}</strong>
                   <span className="book-meta">
                     {book.authors?.join(", ")} {book.year && `(${book.year})`}
+                    {book.has_text && <span className="text-badge">全文可用</span>}
                   </span>
                 </div>
                 <button
                   onClick={() => handleAnalyze(book)}
-                  disabled={!book.ia_id || loading}
+                  disabled={!book.has_text || loading}
                   className="analyze-btn"
                 >
-                  {book.ia_id ? "分析人物关系" : "无全文"}
+                  {book.has_text ? "分析人物关系" : book.ia_id ? "无文本文件" : "无资源"}
                 </button>
               </li>
             ))}

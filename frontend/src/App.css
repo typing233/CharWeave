@@ -58,6 +58,16 @@
   background: #2980b9;
 }
 
+.text-badge {
+  display: inline-block;
+  background: #d4edda;
+  color: #155724;
+  font-size: 0.75rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 10px;
+  margin-left: 0.5rem;
+}
+
 .error-msg {
   background: #fee;
   border: 1px solid #fcc;

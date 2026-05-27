@@ -35,7 +35,18 @@ class AnalyzeResponse(BaseModel):
 @app.post("/api/search")
 async def search(req: SearchRequest):
     results = await search_books(req.query, req.search_type)
-    return {"results": results}
+    # Remove internal fields before sending to frontend
+    clean = []
+    for r in results:
+        clean.append({
+            "key": r["key"],
+            "title": r["title"],
+            "authors": r["authors"],
+            "year": r["year"],
+            "ia_id": r["ia_id"],
+            "has_text": r["has_text"],
+        })
+    return {"results": clean}
 
 
 @app.post("/api/analyze", response_model=AnalyzeResponse)
@@ -44,11 +55,11 @@ async def analyze(req: AnalyzeRequest):
     if not text:
         raise HTTPException(status_code=404, detail="无法获取书籍全文，该书可能不是公版书或不支持文本格式。")
 
-    characters = extract_characters(text)
+    characters, alias_map = extract_characters(text)
     if not characters:
         raise HTTPException(status_code=422, detail="未能从文本中提取到人物实体。")
 
-    relationships = build_relationships(text, characters)
+    relationships = build_relationships(text, characters, alias_map)
     mermaid = generate_mermaid(characters, relationships)
 
     return AnalyzeResponse(
