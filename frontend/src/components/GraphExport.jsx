@@ -64,6 +64,10 @@ function GraphExport({ graphRef, mermaidCode }) {
 
   return (
     <div className="graph-export">
+      <button className="export-btn export-reset" onClick={() => graphRef.current?.resetLayout()} title="重置布局，解除所有固定节点">
+        重置布局
+      </button>
+      <span className="export-divider" />
       <span className="export-label">导出图谱:</span>
       <button className="export-btn export-svg" onClick={exportSVG} title="下载 SVG 矢量图">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">

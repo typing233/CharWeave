@@ -400,6 +400,22 @@
   margin-right: 0.3rem;
 }
 
+.export-divider {
+  width: 1px;
+  height: 20px;
+  background: #ddd;
+  margin: 0 0.4rem;
+}
+
+.export-reset {
+  color: #e67e22 !important;
+  border-color: #e67e22 !important;
+}
+
+.export-reset:hover {
+  background: #fef5ec !important;
+}
+
 .export-btn {
   display: flex;
   align-items: center;

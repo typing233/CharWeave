@@ -23,6 +23,15 @@ const ForceGraph = forwardRef(function ForceGraph(
 
   useImperativeHandle(ref, () => ({
     getSvgElement: () => svgRef.current,
+    resetLayout: () => {
+      if (simulationRef.current) {
+        simulationRef.current.nodes().forEach((d) => {
+          d.fx = null;
+          d.fy = null;
+        });
+        simulationRef.current.alpha(0.5).restart();
+      }
+    },
   }));
 
   useEffect(() => {
@@ -189,8 +198,8 @@ const ForceGraph = forwardRef(function ForceGraph(
       })
       .on("end", (event, d) => {
         if (!event.active) simulation.alphaTarget(0);
-        d.fx = null;
-        d.fy = null;
+        d.fx = d.x;
+        d.fy = d.y;
       });
 
     node.call(drag);
