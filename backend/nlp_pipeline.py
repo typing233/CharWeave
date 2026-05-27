@@ -28,7 +28,46 @@ STOP_NAMES = {
     "July", "August", "September", "October", "November", "December",
     "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
     "English", "French", "German", "American", "British", "European",
+    "Looky", "Heah", "Lordy", "Goodness",
 }
+
+# ─── OCR junk prefixes that appear before real names ───
+OCR_PREFIXES = {
+    "misto", "mars", "hap", "ir", "ole", "ol",
+    "dat", "dis", "dem", "dey", "sah", "mos",
+    "looky", "heah", "doan", "gwyne",
+}
+
+# ─── Ordinals / non-name words that appear as second token (OCR or misparse) ───
+ORDINAL_WORDS = {
+    "first", "second", "third", "fourth", "fifth", "sixth",
+    "seventh", "eighth", "ninth", "tenth", "eleventh", "twelfth",
+    "last", "next", "other", "same",
+}
+
+# ─── Common English place names (single-word) that spaCy often mislabels as PERSON ───
+KNOWN_PLACES = {
+    "London", "Paris", "Kent", "Bath", "Brighton", "Oxford", "Cambridge",
+    "England", "France", "Ireland", "Scotland", "Wales", "America",
+    "Rome", "Berlin", "Vienna", "Madrid", "Naples", "Florence",
+    "Longbourn", "Netherfield", "Pemberley", "Rosings", "Meryton",
+    "Hunsford", "Lambton", "Derbyshire", "Hertfordshire",
+    "Mississippi", "Missouri", "Orleans", "Cairo", "Memphis",
+    "Petersburg", "Boston", "Philadelphia", "Jerusalem",
+}
+
+# ─── Common English words that are unlikely to be standalone character names ───
+COMMON_WORDS = {
+    "Long", "Young", "Good", "Little", "Great", "Old", "New",
+    "Rich", "Strong", "Sharp", "Short", "Grand", "Hardy",
+    "Black", "White", "Green", "Brown", "Gray", "Grey",
+    "Hill", "Dale", "Brook", "Stone", "Wood", "Cross",
+    "Church", "West", "East", "North", "South",
+    "Day", "Night", "Spring", "Summer", "Winter", "Fall",
+}
+
+# ─── "X of Y" patterns that are place/thing names, not people ───
+OF_PATTERN = re.compile(r"^(\w+)\s+of\s+(\w+)$", re.IGNORECASE)
 
 # ─── Regex filters for OCR noise, HTML ───
 NOISE_RE = re.compile(
@@ -80,7 +119,6 @@ KNOWN_NICKNAMES = {
 
 def _clean_name(raw: str) -> str | None:
     name = raw.strip()
-    # Fix hyphenated line breaks: "Fitz- william" → "Fitzwilliam"
     name = re.sub(r"-\s+", "", name)
     name = LEADING_PUNCT_RE.sub("", name)
     name = TRAILING_PUNCT_RE.sub("", name)
@@ -92,33 +130,83 @@ def _clean_name(raw: str) -> str | None:
         return None
     if name in STOP_NAMES:
         return None
+    if name in KNOWN_PLACES:
+        return None
     if NOISE_RE.search(name):
         return None
     if ALLCAPS_RE.search(name):
         return None
     if not name[0].isupper():
         return None
+
     parts = name.split()
+
     if all(len(p) <= 1 for p in parts):
         return None
-    if any(w in name for w in ("Memoir", "Neither", "Chapter", "Volume", "Preface")):
+
+    # Reject non-name content words
+    if any(w in name for w in ("Memoir", "Neither", "Chapter", "Volume", "Preface", "Introduction")):
         return None
-    # Reject names where any word is 1-2 chars and all lowercase (OCR fragments like "Hap", "Ir")
-    # unless it’s a recognized short word like "de", "le", "of"
+
+    # ─── OCR prefix filter ───
+    # "Misto Tom", "Mars Buck", "Hap Elizabeth" → strip the junk prefix
+    if len(parts) >= 2 and parts[0].lower() in OCR_PREFIXES:
+        parts = parts[1:]
+        name = " ".join(parts)
+        if not name or not name[0].isupper():
+            return None
+
+    # ─── Ordinal/non-name word in any position ───
+    # "James Second", "William Fourth" → strip the ordinal
+    new_parts = [p for p in parts if p.lower() not in ORDINAL_WORDS]
+    if len(new_parts) < len(parts):
+        parts = new_parts
+        name = " ".join(parts)
+        if not name:
+            return None
+
+    # Short lowercase tokens that aren’t prepositions
     allowed_short = {"de", "du", "le", "la", "of", "von", "van", "al", "el", "di", "da"}
     for p in parts:
-        if len(p) <= 3 and p.lower() not in allowed_short and not p[0].isupper():
+        if len(p) <= 2 and p.lower() not in allowed_short and not p[0].isupper():
             return None
-    # Reject multi-word names where first word is not a known name pattern (OCR: "Hap Elizabeth")
-    if len(parts) >= 2 and len(parts[0]) <= 3 and parts[0].lower() not in allowed_short:
-        # Very short first word that’s not a recognized prefix → likely OCR
-        return None
-    # Single-word names that end in common place-name suffixes
-    if len(parts) == 1 and re.search(r"(bourne?|field|shire|town|land|burg|ford|ham|ley|wood|park|hall|castle)$", name, re.IGNORECASE):
-        return None
-    # OCR noise: dot followed by lowercase (like "Long.and")
+
+    # Single-word place-name suffixes
+    if len(parts) == 1:
+        if re.search(
+            r"(bourne?|field|shire|town|land|burg|ford|ham|ley|wood|park|hall|castle|bridge|minster|mouth|pool|wick|stead)$",
+            name, re.IGNORECASE
+        ):
+            return None
+
+    # "X of Y" where Y looks like a place (capitalized, ends in place suffix, or is known)
+    m = OF_PATTERN.match(name)
+    if m:
+        y_word = m.group(2)
+        if y_word in KNOWN_PLACES:
+            return None
+        if re.search(r"(shire|ham|bury|ton|ley|land|stead)$", y_word, re.IGNORECASE):
+            return None
+
+    # OCR noise: dot followed by lowercase
     if re.search(r"\.[a-z]", name):
         return None
+
+    # Single-word names that are too short (likely not real character names)
+    if len(parts) == 1 and len(name) <= 3:
+        return None
+
+    # Single-word names that are common English words (not character names)
+    if len(parts) == 1 and name in COMMON_WORDS:
+        return None
+
+    # Too many words — likely OCR concatenation of multiple names
+    if len(parts) > 3:
+        return None
+
+    if len(name) < 2:
+        return None
+
     return name
 
 
@@ -134,8 +222,13 @@ def _normalize(name: str) -> str:
 
 def extract_characters(text: str, max_chars: int = 500_000) -> tuple[list[str], dict[str, set[str]]]:
     """Returns (canonical_names, alias_map) where alias_map[canonical] = {all variants}."""
+    # Skip front/back matter (prefaces, endnotes) — analyze middle 85%
     text = text[:max_chars]
-    doc = nlp(text)
+    total_len = len(text)
+    skip_front = total_len * 8 // 100
+    skip_back = total_len * 7 // 100
+    body = text[skip_front:total_len - skip_back] if total_len > 20000 else text
+    doc = nlp(body)
 
     # Count how often each name appears as PERSON vs non-PERSON entity
     person_counts: Counter = Counter()
@@ -257,7 +350,14 @@ def _merge_score(name: str, norm: str, canon: str, canon_norm: str) -> int:
         return 0
 
     # Both multi-word: merge only if they share the same surname AND a first name component
+    # OR one is a prefix of the other ("Mary Jane" ⊂ "Mary Jane Wilks")
     if len(name_parts) > 1 and len(canon_parts) > 1:
+        # Prefix match: shorter is exact prefix of longer
+        shorter = name_parts if len(name_parts) <= len(canon_parts) else canon_parts
+        longer = canon_parts if len(name_parts) <= len(canon_parts) else name_parts
+        if all(shorter[i].lower() == longer[i].lower() for i in range(len(shorter))):
+            return 85
+
         if name_parts[-1].lower() == canon_parts[-1].lower():
             name_first = set(w.lower() for w in name_parts[:-1])
             canon_first = set(w.lower() for w in canon_parts[:-1])
